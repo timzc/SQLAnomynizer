@@ -1,5 +1,6 @@
 package com.anonymizer.app.config;
 
+import com.anonymizer.app.db.DatabaseType;
 import org.apache.commons.configuration2.Configuration;
 import org.apache.commons.configuration2.builder.fluent.Configurations;
 import org.apache.commons.configuration2.ex.ConfigurationException;
@@ -10,27 +11,41 @@ import java.io.File;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 
 /**
- * Loads and provides access to application configuration
+ * 配置加载器，负责加载和提供应用程序配置
  */
 public class ConfigLoader {
     private static final Logger logger = LoggerFactory.getLogger(ConfigLoader.class);
     private static final String CONFIG_FILE = "config.properties";
     
     private Configuration config;
+    private Properties properties;
     
     public ConfigLoader() {
         loadConfig();
     }
     
+    /**
+     * 加载配置文件
+     */
     private void loadConfig() {
         try {
             Configurations configs = new Configurations();
             config = configs.properties(new File("src/main/resources/" + CONFIG_FILE));
+            
+            // 转换为Properties对象
+            properties = new Properties();
+            for (Iterator<String> it = config.getKeys(); it.hasNext();) {
+                String key = it.next();
+                properties.setProperty(key, config.getString(key));
+            }
+            
             logger.info("Configuration loaded successfully");
         } catch (ConfigurationException e) {
             logger.error("Error loading configuration: {}", e.getMessage(), e);
@@ -38,16 +53,23 @@ public class ConfigLoader {
         }
     }
     
-    public String getDatabaseUrl() {
-        return config.getString("db.url") + config.getString("db.name");
+    /**
+     * 获取数据库类型
+     * 
+     * @return 数据库类型
+     */
+    public DatabaseType getDatabaseType() {
+        String type = config.getString("database.type", "mysql");
+        return DatabaseType.fromString(type);
     }
     
-    public String getDatabaseUser() {
-        return config.getString("db.user");
-    }
-    
-    public String getDatabasePassword() {
-        return config.getString("db.password");
+    /**
+     * 获取配置属性
+     * 
+     * @return 配置属性
+     */
+    public Properties getProperties() {
+        return properties;
     }
     
     /**

@@ -1,9 +1,10 @@
 # 数据脱敏工具
 
-一个Java应用程序，用于连接MySQL数据库并根据可配置的规则对表中的敏感数据进行脱敏处理。
+一个Java应用程序，用于连接MySQL、Oracle或PostgreSQL数据库并根据可配置的规则对表中的敏感数据进行脱敏处理。
 
 ## 功能特点
 
+- 支持多种数据库类型（MySQL、Oracle、PostgreSQL）
 - 可配置的数据库连接（URL、用户名、密码）
 - 支持同时处理多个表
 - 针对不同类型敏感数据的脱敏规则：
@@ -56,19 +57,19 @@
 ## 系统要求
 
 - Java 11 或更高版本
-- MySQL 数据库
+- MySQL、Oracle或PostgreSQL数据库
 - Maven
 
 ## 配置说明
 
-编辑 `src/main/resources/config.properties` 文件来配置应用程序。新版本支持同时处理多个表：
+编辑 `src/main/resources/config.properties` 文件来配置应用程序。新版本支持多种数据库类型和多表处理：
 
 ```properties
 # 数据库配置
-db.url=jdbc:mysql://localhost:3306/
-db.name=your_database_name
-db.user=your_username
-db.password=your_password
+database.type=mysql
+database.url=jdbc:mysql://localhost:3306/your_database_name
+database.username=your_username
+database.password=your_password
 
 # 表配置 (逗号分隔的表名列表)
 tables=customers,orders,transactions
@@ -99,6 +100,30 @@ column.type.orders.phone=PHONE
 column.type.transactions.card_number=BANK_CARD
 column.type.transactions.amount=AMOUNT
 column.type.transactions.description=TEXT
+```
+
+### 数据库类型配置
+
+工具支持三种数据库类型，通过修改 `database.type` 配置项来切换：
+
+```properties
+# MySQL配置示例
+database.type=mysql
+database.url=jdbc:mysql://localhost:3306/your_database_name
+database.username=your_username
+database.password=your_password
+
+# Oracle配置示例
+# database.type=oracle
+# database.url=jdbc:oracle:thin:@localhost:1521:orcl
+# database.username=your_username
+# database.password=your_password
+
+# PostgreSQL配置示例
+# database.type=postgresql
+# database.url=jdbc:postgresql://localhost:5432/your_database_name
+# database.username=your_username
+# database.password=your_password
 ```
 
 ## 构建应用

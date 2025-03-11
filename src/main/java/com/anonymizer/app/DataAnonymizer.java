@@ -8,7 +8,7 @@ import org.slf4j.LoggerFactory;
 import java.sql.SQLException;
 
 /**
- * Main class for the Data Anonymizer application
+ * 数据脱敏应用程序主类
  */
 public class DataAnonymizer {
     private static final Logger logger = LoggerFactory.getLogger(DataAnonymizer.class);
@@ -17,19 +17,19 @@ public class DataAnonymizer {
         logger.info("Starting Data Anonymizer");
         
         try {
-            // Load configuration
+            // 加载配置
             ConfigLoader configLoader = new ConfigLoader();
             
-            // Initialize database service
-            DatabaseService dbService = new DatabaseService(configLoader);
+            // 初始化数据库服务
+            DatabaseService dbService = new DatabaseService(configLoader, configLoader.getProperties());
             
-            // Connect to the database
+            // 连接数据库
             dbService.connect();
             
-            // Anonymize the data in all configured tables
+            // 对所有配置的表进行脱敏
             dbService.anonymizeAllTables();
             
-            // Disconnect from the database
+            // 断开数据库连接
             dbService.disconnect();
             
             logger.info("Data anonymization completed successfully");

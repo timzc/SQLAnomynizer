@@ -10,6 +10,7 @@ import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 
 /**
@@ -20,30 +21,30 @@ public class DatabaseService {
     
     private final ConfigLoader configLoader;
     private Connection connection;
+    private Properties config;
+    private DatabaseDialect dialect;
     
-    public DatabaseService(ConfigLoader configLoader) {
+    public DatabaseService(ConfigLoader configLoader, Properties config) {
         this.configLoader = configLoader;
+        this.config = config;
+        String dbType = config.getProperty("database.type", "mysql");
+        this.dialect = DatabaseDialect.create(DatabaseType.fromString(dbType));
     }
     
     /**
      * Connect to the database
      */
     public void connect() throws SQLException {
+        String url = config.getProperty("database.url");
+        String username = config.getProperty("database.username");
+        String password = config.getProperty("database.password");
+        
         try {
-            // Load the MySQL JDBC driver
-            Class.forName("com.mysql.cj.jdbc.Driver");
-            
-            // Connect to the database
-            connection = DriverManager.getConnection(
-                    configLoader.getDatabaseUrl(),
-                    configLoader.getDatabaseUser(),
-                    configLoader.getDatabasePassword()
-            );
-            
-            logger.info("Connected to database: {}", configLoader.getDatabaseUrl());
+            Class.forName(DatabaseType.fromString(config.getProperty("database.type", "mysql")).getDriverClassName());
+            connection = DriverManager.getConnection(url, username, password);
+            connection.setAutoCommit(false);
         } catch (ClassNotFoundException e) {
-            logger.error("MySQL JDBC driver not found", e);
-            throw new SQLException("MySQL JDBC driver not found", e);
+            throw new SQLException("Database driver not found", e);
         }
     }
     
@@ -65,29 +66,25 @@ public class DatabaseService {
      * 脱敏所有配置的表
      */
     public void anonymizeAllTables() throws SQLException {
-        Map<String, Set<String>> tablesAndColumns = configLoader.getAllTablesAndColumns();
+        List<String> tables = configLoader.getTables();
+        int totalTables = tables.size();
+        int processedTables = 0;
         
-        if (tablesAndColumns.isEmpty()) {
-            logger.warn("No tables configured for anonymization");
-            return;
-        }
+        logger.info("Starting anonymization of {} tables", totalTables);
         
-        int totalTablesProcessed = 0;
-        int totalRowsProcessed = 0;
-        
-        for (Map.Entry<String, Set<String>> entry : tablesAndColumns.entrySet()) {
-            String tableName = entry.getKey();
-            Set<String> columns = entry.getValue();
-            
-            int rowsProcessed = anonymizeTable(tableName, new ArrayList<>(columns));
-            if (rowsProcessed > 0) {
-                totalTablesProcessed++;
-                totalRowsProcessed += rowsProcessed;
+        for (String tableName : tables) {
+            try {
+                List<String> columnsToAnonymize = configLoader.getColumnsToAnonymize(tableName);
+                anonymizeTable(tableName, columnsToAnonymize);
+                processedTables++;
+                logger.info("Processed table {}: {}/{}", tableName, processedTables, totalTables);
+            } catch (SQLException e) {
+                logger.error("Error processing table {}: {}", tableName, e.getMessage());
+                throw e;
             }
         }
         
-        logger.info("Anonymization completed for {} tables, {} rows processed", 
-                totalTablesProcessed, totalRowsProcessed);
+        logger.info("Completed anonymization of {} tables", processedTables);
     }
     
     /**
@@ -98,20 +95,13 @@ public class DatabaseService {
      */
     public List<String> getTableColumns(String tableName) throws SQLException {
         List<String> columns = new ArrayList<>();
-        
-        String query = "SELECT * FROM " + tableName + " LIMIT 1";
-        
         try (Statement stmt = connection.createStatement();
-             ResultSet rs = stmt.executeQuery(query)) {
-            
+             ResultSet rs = stmt.executeQuery(dialect.getTableStructureQuery(tableName))) {
             ResultSetMetaData metaData = rs.getMetaData();
-            int columnCount = metaData.getColumnCount();
-            
-            for (int i = 1; i <= columnCount; i++) {
+            for (int i = 1; i <= metaData.getColumnCount(); i++) {
                 columns.add(metaData.getColumnName(i));
             }
         }
-        
         return columns;
     }
     
@@ -122,124 +112,40 @@ public class DatabaseService {
      * @param columnsToAnonymize 需要脱敏的列
      * @return 处理的行数
      */
-    private int anonymizeTable(String tableName, List<String> columnsToAnonymize) throws SQLException {
-        logger.info("Processing table: {}", tableName);
-        
-        // 获取表的列类型配置
-        Map<String, String> columnTypes = configLoader.getColumnTypes(tableName);
-        
-        // 获取表的所有列
-        List<String> allColumns;
-        try {
-            allColumns = getTableColumns(tableName);
-        } catch (SQLException e) {
-            logger.error("Error getting columns for table {}: {}", tableName, e.getMessage());
-            return 0;
-        }
-        
-        if (allColumns.isEmpty()) {
-            logger.warn("Table {} appears to be empty or does not exist", tableName);
-            return 0;
-        }
-        
-        // 过滤出表中实际存在的列
-        List<String> validColumnsToAnonymize = new ArrayList<>();
-        for (String column : columnsToAnonymize) {
-            if (allColumns.contains(column)) {
-                validColumnsToAnonymize.add(column);
-            } else {
-                logger.warn("Column {} not found in table {}", column, tableName);
-            }
-        }
-        
-        if (validColumnsToAnonymize.isEmpty()) {
-            logger.warn("No valid columns to anonymize in table {}", tableName);
-            return 0;
-        }
-        
-        int totalRowsProcessed = 0;
-        
-        // 获取表的主键列
+    private void anonymizeTable(String tableName, List<String> columnsToAnonymize) throws SQLException {
         String primaryKeyColumn = getPrimaryKeyColumn(tableName);
-        if (primaryKeyColumn == null || primaryKeyColumn.isEmpty()) {
-            logger.warn("No primary key found for table {}, using first column as identifier", tableName);
-            primaryKeyColumn = allColumns.get(0);
-        }
+        String[] columns = columnsToAnonymize.toArray(new String[0]);
+        String updateQuery = dialect.getUpdateQuery(tableName, columns, primaryKeyColumn);
         
-        // 获取表中的所有行
-        String selectQuery = "SELECT * FROM " + tableName;
-        try (Statement selectStmt = connection.createStatement();
-             ResultSet rs = selectStmt.executeQuery(selectQuery)) {
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery(dialect.getSelectAllQuery(tableName));
+             PreparedStatement pstmt = connection.prepareStatement(updateQuery)) {
             
-            // 对每一行进行处理
+            int batchSize = 0;
             while (rs.next()) {
-                String idValue = rs.getString(primaryKeyColumn);
-                
-                // 构建更新查询
-                StringBuilder updateQuery = new StringBuilder();
-                updateQuery.append("UPDATE ").append(tableName).append(" SET ");
-                
-                // 准备SET部分
-                boolean firstColumn = true;
-                for (String column : validColumnsToAnonymize) {
-                    if (rs.getString(column) == null) {
-                        continue;
-                    }
-                    
-                    if (!firstColumn) {
-                        updateQuery.append(", ");
-                    }
-                    updateQuery.append(column).append(" = ?");
-                    firstColumn = false;
+                int paramIndex = 1;
+                for (String column : columnsToAnonymize) {
+                    String originalValue = rs.getString(column);
+                    String anonymizedValue = anonymizeValue(originalValue, getAnonymizationRule(tableName, column));
+                    pstmt.setString(paramIndex++, anonymizedValue);
                 }
+                pstmt.setObject(paramIndex, rs.getObject(primaryKeyColumn));
+                pstmt.addBatch();
                 
-                // 如果没有有效列需要更新，则跳过
-                if (firstColumn) {
-                    continue;
-                }
-                
-                // 添加WHERE子句
-                updateQuery.append(" WHERE ").append(primaryKeyColumn).append(" = ?");
-                
-                // 执行更新
-                try (PreparedStatement updateStmt = connection.prepareStatement(updateQuery.toString())) {
-                    int paramIndex = 1;
-                    
-                    // 设置每列的值
-                    for (String column : validColumnsToAnonymize) {
-                        String originalValue = rs.getString(column);
-                        if (originalValue == null) {
-                            continue;
-                        }
-                        
-                        // 获取该列的脱敏规则
-                        String columnType = columnTypes.get(column);
-                        AnonymizationRule rule = AnonymizationRules.getRule(columnType);
-                        
-                        // 应用规则
-                        String anonymizedValue = rule.anonymize(originalValue);
-                        
-                        // 设置参数
-                        updateStmt.setString(paramIndex++, anonymizedValue);
-                        
-                        // 记录脱敏过程
-                        logger.debug("Anonymizing {}.{} ({}): {} -> {}", 
-                                tableName, column, columnType, originalValue, anonymizedValue);
-                    }
-                    
-                    // 设置ID参数
-                    updateStmt.setString(paramIndex, idValue);
-                    
-                    // 执行更新
-                    int rowsUpdated = updateStmt.executeUpdate();
-                    totalRowsProcessed += rowsUpdated;
-                    logger.debug("Updated {} rows for ID {} in table {}", rowsUpdated, idValue, tableName);
+                if (++batchSize % 1000 == 0) {
+                    pstmt.executeBatch();
+                    connection.commit();
                 }
             }
+            
+            if (batchSize % 1000 != 0) {
+                pstmt.executeBatch();
+                connection.commit();
+            }
+        } catch (SQLException e) {
+            connection.rollback();
+            throw e;
         }
-        
-        logger.info("Anonymization completed for table {}: {} rows processed", tableName, totalRowsProcessed);
-        return totalRowsProcessed;
     }
     
     /**
@@ -248,17 +154,50 @@ public class DatabaseService {
      * @param tableName 表名
      * @return 主键列名，如果没有找到则返回null
      */
-    private String getPrimaryKeyColumn(String tableName) {
-        try {
+    private String getPrimaryKeyColumn(String tableName) throws SQLException {
+        String primaryKeyQuery = dialect.getPrimaryKeyQuery(tableName);
+        if (primaryKeyQuery != null) {
+            try (Statement stmt = connection.createStatement();
+                 ResultSet rs = stmt.executeQuery(primaryKeyQuery)) {
+                if (rs.next()) {
+                    return rs.getString(1);
+                }
+            }
+        } else {
+            // 使用JDBC元数据API获取主键
             DatabaseMetaData metaData = connection.getMetaData();
             try (ResultSet rs = metaData.getPrimaryKeys(null, null, tableName)) {
                 if (rs.next()) {
                     return rs.getString("COLUMN_NAME");
                 }
             }
-        } catch (SQLException e) {
-            logger.warn("Error getting primary key for table {}: {}", tableName, e.getMessage());
         }
-        return null;
+        throw new SQLException("No primary key found for table: " + tableName);
+    }
+    
+    /**
+     * 获取指定表列的脱敏规则
+     * 
+     * @param tableName 表名
+     * @param columnName 列名
+     * @return 脱敏规则
+     */
+    private AnonymizationRule getAnonymizationRule(String tableName, String columnName) {
+        String columnType = configLoader.getColumnTypes(tableName).get(columnName);
+        return AnonymizationRules.getRule(columnType);
+    }
+    
+    /**
+     * 使用脱敏规则处理值
+     * 
+     * @param originalValue 原始值
+     * @param rule 脱敏规则
+     * @return 脱敏后的值
+     */
+    private String anonymizeValue(String originalValue, AnonymizationRule rule) {
+        if (originalValue == null) {
+            return null;
+        }
+        return rule.anonymize(originalValue);
     }
 } 
